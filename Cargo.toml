@@ -6,3 +6,5 @@ description = "A Rust port of caarlos0/env - parse environment variables into st
 license = "MIT"
 
 [dependencies]
+duration-str = { version = "0.21", features = ["lowercase"] }
+url = "2.5.8"
