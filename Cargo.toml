@@ -2,5 +2,7 @@
 name = "envo"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust port of caarlos0/env - parse environment variables into structs. Link: https://github.com/caarlos0/env"
+license = "MIT"
 
 [dependencies]
