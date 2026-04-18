@@ -33,8 +33,11 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
 use url::Url;
+use crate::{EmptyVarError, ParseError, ParseValueError, VarIsNotSetError};
 
+// This is the implementation of the ParserFunc in Go
 pub trait Parser: Sized {
     fn parse(s: &str) -> Result<Self, Box<dyn Error>>;
 }
@@ -135,6 +138,19 @@ impl Parser for std::time::Duration {
     }
 }
 
+impl Parser for chrono_tz::Tz {
+    fn parse(s: &str) -> Result<Self, Box<dyn Error>> {
+        // Simple version
+        // Ok(s.parse::<chrono_tz::Tz>()?)
+        s.parse::<chrono_tz::Tz>().map_err(|e| {
+            Box::new(ParseValueError {
+                msg: "unable to parse location".to_string(),
+                err: Box::new(io::Error::new(io::ErrorKind::Other, e.to_string()))
+            }) as Box<dyn Error>
+        })
+    }
+}
+
 /*
     One thing to keep in mind — Go's interface{} and Rust's Box<dyn Any> are similar but not
     identical. In Rust, downcasting from Box<dyn Any> back to a concrete type requires calling
@@ -162,6 +178,7 @@ type ProcessFieldFn = fn(
     field_params: &FieldParams,
 ) -> Result<(), Box<dyn Error>>;
 
+#[derive(Clone)]
 pub struct Options {
     // Environment keys and values that will be accessible for the service.
     pub environment: HashMap<String, String>,
@@ -207,7 +224,7 @@ pub struct Options {
 }
 
 impl Options {
-    fn get_raw_env(&self, s: &str) -> String {
+    pub fn get_raw_env(&self, s: &str) -> String {
         let value = self.raw_env_vars.get(s).map_or("", |s| s.as_str());
 
         let value = if value.is_empty() {
@@ -221,8 +238,64 @@ impl Options {
         }).unwrap_or_else(|_| Cow::from(value))
           .to_string()
     }
+
+    // Merges user-provided options into the default options.
+    // Only non-zero/non-empty fields from the user-provided options
+    // will override the defaults. FuncMap is merged rather than overwritten,
+    // allowing custom parsers to extend the built-in ones.
+    pub fn custom_options(self) -> Self {
+        let mut default = Options::default();
+
+        if !self.tag_name.is_empty() { default.tag_name = self.tag_name; }
+        if !self.prefix_tag_name.is_empty() { default.prefix_tag_name = self.prefix_tag_name; }
+        if !self.prefix.is_empty() { default.prefix = self.prefix; }
+        if !self.default_value_tag_name.is_empty() {
+            default.default_value_tag_name = self.default_value_tag_name;
+        }
+
+        if self.required_if_no_def {
+            default.required_if_no_def = true;
+        }
+
+        if self.use_fieldname_by_default {
+            default.use_fieldname_by_default = true;
+        }
+
+        if self.set_defaults_for_zero_values_only {
+            default.set_defaults_for_zero_values_only = true;
+        }
+
+        if !self.environment.is_empty() {
+            default.environment = self.environment;
+        }
+
+        if self.on_set.is_some() {
+            default.on_set = self.on_set;
+        }
+
+        // func_map is special: merge instead of overwrite.
+        default.func_map.extend(self.func_map);
+
+        default
+    }
+
+    // Returns Options with Slice Environment Prefix
+    pub fn options_with_slice_env_prefix(&self, index: usize) -> Self {
+        Options {
+            prefix: format!("{}{}_", self.prefix, index),
+            ..self.clone()
+        }
+    }
+
+    pub fn options_with_env_prefix(&self, prefix_value: &str) -> Self {
+        Options {
+            prefix: self.prefix.clone() + prefix_value,
+            ..self.clone()
+        }
+    }
 }
 
+// Transformed the Go defaultOptions function into an impl block
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -235,6 +308,61 @@ impl Default for Options {
             ..Default::default()
         }
     }
+}
+
+pub trait FromEnv: Sized {
+    fn from_env(opts: &Options) -> Result<Self, Box<dyn Error>>;
+}
+
+pub fn parse_internal<T: FromEnv>(opts: Options) -> Result<T, Box<dyn Error>> {
+    T::from_env(&opts)
+}
+
+pub fn parse_field<T: Parser>(key: &str, opts: &Options) -> Result<T, Box<dyn Error>> {
+    // 1. Look up the env var value
+    let raw_value = opts.environment.get(key);
+
+    // 2. Check if required
+    if raw_value.is_none() {
+        return Err(Box::new(VarIsNotSetError {
+            key: key.to_string()
+        }));
+    }
+
+    // 3. Check if empty
+    let raw_value = raw_value.unwrap();
+    if raw_value.is_empty() {
+        return Err(Box::new(EmptyVarError {
+            key: key.to_string()
+        }));
+    }
+
+    // 4. Parse into target type using Parser trait
+    T::parse(raw_value).map_err(|e| {
+        Box::new(ParseError {
+            name: key.to_string(),
+            type_name: std::any::type_name::<T>().to_string(),
+            err: e,
+        }) as Box<dyn Error>
+    })
+}
+
+/*pub fn parse<T>(v: &mut T) -> Result<(), Box<dyn Error>> {
+    todo!()
+}
+pub fn parse_with_options<T>(v: &mut T, opts: Options) -> Result<(), Box<dyn Error>> {
+    todo!()
+}
+
+pub fn parse_as<T: Default>() -> Result<T, Box<dyn Error>> {
+    todo!()
+}
+pub fn parse_as_with_options<T: Default>(opts: Options) -> Result<T, Box<dyn Error>> {
+    todo!()
+}*/
+
+pub fn must<T>(result: Result<T, Box<dyn Error>>) -> T {
+    result.unwrap_or_else(|e| panic!("{}", e))
 }
 
 pub fn to_map(env: Vec<(String, String)>) -> HashMap<String, String> {
@@ -253,3 +381,4 @@ pub struct  FieldParams {
     pub init: bool,
     pub ignored: bool
 }
+
