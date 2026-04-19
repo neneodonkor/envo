@@ -33,6 +33,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs;
 use std::io;
 use url::Url;
 use crate::{EmptyVarError, ParseError, ParseValueError, VarIsNotSetError};
@@ -239,10 +240,10 @@ impl Options {
           .to_string()
     }
 
-    // Merges user-provided options into the default options.
-    // Only non-zero/non-empty fields from the user-provided options
-    // will override the defaults. FuncMap is merged rather than overwritten,
-    // allowing custom parsers to extend the built-in ones.
+    /// Merges user-provided options into the default options.
+    /// Only non-zero/non-empty fields from the user-provided options
+    /// will override the defaults. FuncMap is merged rather than overwritten,
+    /// allowing custom parsers to extend the built-in ones.
     pub fn custom_options(self) -> Self {
         let mut default = Options::default();
 
@@ -310,10 +311,6 @@ impl Default for Options {
     }
 }
 
-pub trait FromEnv: Sized {
-    fn from_env(opts: &Options) -> Result<Self, Box<dyn Error>>;
-}
-
 pub fn parse_internal<T: FromEnv>(opts: Options) -> Result<T, Box<dyn Error>> {
     T::from_env(&opts)
 }
@@ -347,19 +344,21 @@ pub fn parse_field<T: Parser>(key: &str, opts: &Options) -> Result<T, Box<dyn Er
     })
 }
 
-/*pub fn parse<T>(v: &mut T) -> Result<(), Box<dyn Error>> {
-    todo!()
-}
-pub fn parse_with_options<T>(v: &mut T, opts: Options) -> Result<(), Box<dyn Error>> {
-    todo!()
+pub fn parse<T: FromEnv>() -> Result<T, Box<dyn Error>> {
+    parse_internal(Options::default())
 }
 
-pub fn parse_as<T: Default>() -> Result<T, Box<dyn Error>> {
-    todo!()
+pub fn parse_with_options<T: FromEnv>(opts: Options) -> Result<T, Box<dyn Error>> {
+    parse_internal(opts.custom_options())
 }
-pub fn parse_as_with_options<T: Default>(opts: Options) -> Result<T, Box<dyn Error>> {
-    todo!()
-}*/
+
+pub fn parse_as<T: FromEnv + Default>() -> Result<T, Box<dyn Error>> {
+    parse::<T>()
+}
+
+pub fn parse_as_with_options<T: FromEnv + Default>(opts: Options) -> Result<T, Box<dyn Error>> {
+    parse_with_options::<T>(opts)
+}
 
 pub fn must<T>(result: Result<T, Box<dyn Error>>) -> T {
     result.unwrap_or_else(|e| panic!("{}", e))
@@ -368,6 +367,7 @@ pub fn must<T>(result: Result<T, Box<dyn Error>>) -> T {
 pub fn to_map(env: Vec<(String, String)>) -> HashMap<String, String> {
     env.into_iter().collect()
 }
+
 pub struct  FieldParams {
     pub own_key: String,
     pub key: String,
@@ -380,5 +380,83 @@ pub struct  FieldParams {
     pub expand: bool,
     pub init: bool,
     pub ignored: bool
+}
+
+pub trait FromEnv: Sized {
+    fn from_env(opts: &Options) -> Result<Self, Box<dyn Error>>;
+}
+
+/// In the original Go library, this function returns metadata about env tags
+/// found on a struct. Since this Rust port uses a convention based approach
+/// instead of struct tags, this function returns an empty Vec.
+/// Consider using the FromEnv trait directly instead.
+pub fn get_field_params<T: FromEnv>(_opts: Options) -> Result<Vec<FieldParams>, Box<dyn Error>> {
+    Ok(Vec::new())
+}
+
+/// See get_field_params for more context.
+pub fn get_field_params_with_options<T: FromEnv>(_opts: Options) -> Result<Vec<FieldParams>,
+    Box<dyn Error>> {
+    Ok(Vec::new())
+}
+
+fn get_from_file(filename: &str) -> Result<String, Box<dyn Error>> {
+    // let mut file = File::open(filename)?;
+    // let mut contents = String::new();
+    // file.read_to_string(&mut contents)?;
+    // Ok(contents)
+
+    Ok(fs::read_to_string(filename)?)
+}
+fn parse_key_for_option(key: &str) -> (String, Vec<&str>) {
+    let parts: Vec<&str> = key.split(',').collect();
+    let key = parts.first().unwrap_or(&"").to_string();
+    let opts = parts.get(1..).unwrap_or_default().to_vec();
+    (key, opts)
+}
+
+fn get_or(key: &str, default_value: &str, def_exists: bool, envs: &HashMap<String, String>) ->
+                                                                                       (String,
+                                                                                        bool,
+                                                                                        bool) {
+    let result = envs.get(key);
+    let exists = result.is_some();
+    let value = result.map_or("", |s| s.as_str());
+
+    if (!exists || key.is_empty()) && def_exists {
+        return (default_value.to_string(), true, true);
+    } else if exists && value.is_empty() && def_exists {
+        return (default_value.clone().to_string(), true, true);
+    } else if !exists {
+        return (String::new(), false, false);
+    }
+
+    (value.to_string(), true, false)
+}
+
+const UNDERSCORE: char = '_';
+
+fn to_env_name(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut output = String::new();
+
+    for (i, c) in chars.iter().enumerate() {
+        if *c == UNDERSCORE {
+            continue
+        }
+
+        if output.len() > 0 && c.is_uppercase() {
+            if chars.len() > i + 1 {
+                let peek = chars[i+1];
+                let prev = chars[i-1];
+                if peek.is_lowercase() || prev.is_lowercase() {
+                    output.push(UNDERSCORE);
+                }
+            }
+        }
+        output.push_str(&c.to_uppercase().to_string());
+    }
+
+    output
 }
 
